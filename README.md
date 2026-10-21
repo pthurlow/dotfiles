@@ -18,7 +18,12 @@ bash bootstrap.sh
 
 If the Xcode Command Line Tools installer pops up, finish it, then run the command again.
 
-The script is safe to re-run. Any dotfile it replaces is backed up to `~/.dotfiles-backup/<timestamp>/` first.
+The script checks before changing anything, so it's safe to run on a Mac that's already set up:
+
+- Tools, apps, Node and npm CLIs that already exist are skipped, including apps installed by hand.
+- Git settings that are already set are kept.
+- An existing SSH key, `~/.secrets` file or GitHub SSH config entry is left alone.
+- If `~/.zshrc`, `~/.zprofile` or `~/.config/git/ignore` already exists and differs, it asks before replacing it (default no) and backs up the old copy to `~/.dotfiles-backup/<timestamp>/`.
 
 ## Options
 
@@ -26,10 +31,10 @@ Set these before `bash` to change the defaults:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ASSUME_YES` | `0` | `1` answers yes to every prompt |
-| `GIT_NAME` | `pthurlow` | `git config user.name` |
-| `GIT_EMAIL` | existing git config, else asks | `git config user.email` |
-| `NODE_VERSION` | `lts/*` | Node version installed with nvm |
+| `ASSUME_YES` | `0` | `1` answers yes to every prompt, including replacing existing dotfiles (backups are still kept) |
+| `GIT_NAME` | `pthurlow` | `git config user.name`, if not already set |
+| `GIT_EMAIL` | asks | `git config user.email`, if not already set |
+| `NODE_VERSION` | `lts/*` | Node version installed with nvm, if Node isn't already installed |
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/pthurlow/dotfiles/main/bootstrap.sh | ASSUME_YES=1 bash
@@ -41,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/pthurlow/dotfiles/main/bootstrap.sh
 - **Homebrew:** installs it if missing (asks first), or updates it and offers to upgrade packages.
 - **Command-line tools:** git, git-lfs, gh, jq, wget, tmux, starship.
 - **Apps:** Ghostty, iTerm2, VS Code, Docker Desktop, Claude, JetBrains Mono Nerd Font.
-- **Node:** nvm with the current LTS, plus the Claude Code, Codex and Gemini CLIs.
+- **Node:** nvm with the current LTS, pnpm, plus the Claude Code, Codex and Gemini CLIs. Next.js is installed per project, not globally: start one with `pnpm create next-app my-app`.
 - **Shell:** `~/.zshrc` and `~/.zprofile` with history, completion, git aliases and the starship prompt.
 - **Git:** name, email, `main` as the default branch, and a global ignore file.
 - **SSH:** an ed25519 key for GitHub, if you don't already have one.

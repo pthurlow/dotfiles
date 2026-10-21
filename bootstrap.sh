@@ -6,13 +6,14 @@
 #   # or
 #   bash bootstrap.sh
 #
-# Safe to re-run: every step checks before installing, and any dotfile it
-# replaces is first copied to ~/.dotfiles-backup/<timestamp>/.
+# Check-first: anything already installed or configured is left alone. An
+# existing dotfile is only replaced if you say yes, and the old copy is kept
+# in ~/.dotfiles-backup/<timestamp>/.
 #
 # Secrets (API keys, tokens) never live here. They go in ~/.secrets, which
 # this script creates empty with mode 600 and ~/.zshrc sources if present.
 #
-# Override defaults with env vars, e.g.:
+# Override defaults with env vars (git values apply only if not already set):
 #   GIT_NAME="Jane" GIT_EMAIL="jane@example.com" NODE_VERSION=22 bash bootstrap.sh
 #   ASSUME_YES=1 bash bootstrap.sh   # answer yes to every prompt
 
@@ -48,15 +49,21 @@ confirm() {
   [[ "$reply" =~ ^[Yy] ]]
 }
 
-# Write stdin to a file, backing up whatever was there if it differs.
+# Write stdin to a file. If the file already exists and differs, ask before
+# replacing it, and back up the old copy.
 install_file() {
   local dest="$1" tmp
   tmp="$(mktemp)"
   cat >"$tmp"
   if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
+    echo "  $dest is up to date"
     rm "$tmp"; return
   fi
   if [ -e "$dest" ]; then
+    if ! confirm "  $dest already exists and differs. Replace it? (a backup is kept)" n; then
+      echo "  kept $dest"
+      rm "$tmp"; return
+    fi
     mkdir -p "$BACKUP_DIR"
     cp -p "$dest" "$BACKUP_DIR/$(basename "$dest")"
     echo "  backed up $dest -> $BACKUP_DIR/"
@@ -109,25 +116,33 @@ fi
 
 if have brew; then
   info "Homebrew packages"
-  brew bundle --file=- <<'BREWFILE' || warn "some brew packages failed; re-run or install them by hand"
-# --- cli ----------------------------------------------------------------------
-brew "git"
-brew "git-lfs"
-brew "gh"
-brew "jq"
-brew "wget"
-brew "tmux"
-brew "starship"          # prompt
+  # Command-line tools: skipped if the command already exists, however it was installed.
+  for formula in git git-lfs gh jq wget tmux starship; do
+    if have "$formula"; then
+      echo "  found $formula"
+    else
+      brew install "$formula" || warn "brew install $formula failed"
+    fi
+  done
 
-# --- apps ---------------------------------------------------------------------
-cask "ghostty"
-cask "iterm2"
-cask "visual-studio-code"
-cask "docker-desktop"
-cask "claude"
-cask "font-jetbrains-mono-nerd-font"   # glyphs for the starship prompt
-BREWFILE
-  git lfs install --skip-repo >/dev/null
+  # Apps: "cask|path it installs to". Skipped if that path exists (including
+  # apps installed by hand) or Homebrew already manages the cask.
+  for entry in \
+    "ghostty|/Applications/Ghostty.app" \
+    "iterm2|/Applications/iTerm.app" \
+    "visual-studio-code|/Applications/Visual Studio Code.app" \
+    "docker-desktop|/Applications/Docker.app" \
+    "claude|/Applications/Claude.app" \
+    "font-jetbrains-mono-nerd-font|$HOME/Library/Fonts/JetBrainsMonoNerdFont-Regular.ttf"
+  do
+    cask="${entry%%|*}"
+    target="${entry#*|}"
+    if [ -e "$target" ] || brew list --cask "$cask" >/dev/null 2>&1; then
+      echo "  found $cask"
+    else
+      brew install --cask "$cask" || warn "brew install --cask $cask failed"
+    fi
+  done
 else
   warn "skipping Homebrew packages (no Homebrew)"
 fi
@@ -143,16 +158,36 @@ fi
 set +u  # nvm.sh is not nounset-safe
 # shellcheck disable=SC1091
 . "$NVM_DIR/nvm.sh"
-nvm install "$NODE_VERSION"
-nvm alias default "$NODE_VERSION" >/dev/null
+if have node; then
+  echo "  found node $(node --version); leaving your default version alone"
+else
+  nvm install "$NODE_VERSION"
+  nvm alias default "$NODE_VERSION" >/dev/null
+fi
 set -u
 
 info "Global npm packages"
-npm install -g \
-  @anthropic-ai/claude-code \
-  @openai/codex \
-  @google/gemini-cli \
-  || warn "some npm globals failed"
+# "command|package": skipped if the command already exists.
+for entry in \
+  "claude|@anthropic-ai/claude-code" \
+  "codex|@openai/codex" \
+  "gemini|@google/gemini-cli"
+do
+  cmd="${entry%%|*}"
+  pkg="${entry#*|}"
+  if have "$cmd"; then
+    echo "  found $cmd"
+  else
+    npm install -g "$pkg" || warn "npm install -g $pkg failed"
+  fi
+done
+
+info "pnpm"
+if have pnpm; then
+  echo "  found pnpm $(pnpm --version)"
+else
+  npm install -g pnpm || warn "pnpm install failed"
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Dotfiles
@@ -191,6 +226,10 @@ export PATH
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 [ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"
+
+# pnpm global packages (pnpm add -g)
+export PNPM_HOME="$HOME/Library/pnpm"
+path=("$PNPM_HOME" $path)
 
 # --- aliases ---------------------------------------------------------------
 alias ll='ls -lAhG'
@@ -232,14 +271,27 @@ if [ ! -f "$HOME/.secrets" ]; then
 # export OPENAI_API_KEY=""
 # export GEMINI_API_KEY=""
 EOF
+  chmod 600 "$HOME/.secrets"
+else
+  echo "  found $HOME/.secrets"
 fi
-chmod 600 "$HOME/.secrets"
 
 info "Git"
-if [ -z "$GIT_EMAIL" ]; then
-  GIT_EMAIL="$(git config --global user.email 2>/dev/null || true)"
-fi
-if [ -z "$GIT_EMAIL" ]; then
+# Set a global git value only if it isn't set already.
+git_default() {
+  local current
+  if current="$(git config --global "$1")"; then
+    echo "  keeping $1 = $current"
+  else
+    git config --global "$1" "$2"
+    echo "  set $1 = $2"
+  fi
+}
+
+existing_email="$(git config --global user.email 2>/dev/null || true)"
+if [ -n "$existing_email" ]; then
+  GIT_EMAIL="$existing_email"
+elif [ -z "$GIT_EMAIL" ]; then
   GIT_EMAIL="$(ask 'Git email (blank to skip): ')"
 fi
 
@@ -250,22 +302,33 @@ install_file "$HOME/.config/git/ignore" <<'EOF'
 .env.local
 EOF
 
-git config --global user.name "$GIT_NAME"
-[ -n "$GIT_EMAIL" ] && git config --global user.email "$GIT_EMAIL"
-git config --global init.defaultBranch main
-git config --global push.autoSetupRemote true
-git config --global core.excludesfile "$HOME/.config/git/ignore"
+git_default user.name "$GIT_NAME"
+[ -n "$GIT_EMAIL" ] && git_default user.email "$GIT_EMAIL"
+git_default init.defaultBranch main
+git_default push.autoSetupRemote true
+git_default core.excludesfile "$HOME/.config/git/ignore"
+
+if have git-lfs && ! git config --global filter.lfs.clean >/dev/null; then
+  git lfs install --skip-repo >/dev/null
+  echo "  enabled git-lfs"
+fi
 
 # ---------------------------------------------------------------------------
 # 5. SSH key for GitHub
 # ---------------------------------------------------------------------------
 info "SSH"
-mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
-if [ ! -f "$HOME/.ssh/id_ed25519" ]; then
+if [ ! -d "$HOME/.ssh" ]; then
+  mkdir "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+fi
+if [ -f "$HOME/.ssh/id_ed25519" ]; then
+  echo "  found $HOME/.ssh/id_ed25519"
+else
   ssh-keygen -t ed25519 -C "${GIT_EMAIL:-$USER@$(hostname -s)}" -f "$HOME/.ssh/id_ed25519" -N ""
   NEW_SSH_KEY=1
 fi
-if ! grep -q '^Host github.com' "$HOME/.ssh/config" 2>/dev/null; then
+if grep -q '^Host github.com' "$HOME/.ssh/config" 2>/dev/null; then
+  echo "  found github.com in $HOME/.ssh/config"
+else
   cat >>"$HOME/.ssh/config" <<'EOF'
 
 Host github.com
